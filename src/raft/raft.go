@@ -25,8 +25,6 @@ import "time"
 import "math/rand"
 import "fmt"
 
-
-
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -535,7 +533,7 @@ func (rf *Raft) CandidateState() {
 			break
 		    }
 		}
-		
+		// RPC might fail, election timeout and may re-elect.
 		if !ok {
 		    return
 		}
