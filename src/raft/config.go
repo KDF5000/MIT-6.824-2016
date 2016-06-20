@@ -152,7 +152,7 @@ func (cfg *config) start1(i int) {
 				for j := 0; j < len(cfg.logs); j++ {
 					if old, oldok := cfg.logs[j][m.Index]; oldok && old != v {
 						// some server has already committed a different value for this entry!
-						err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v.\n raft[0] = %v, commitindex = %v, state = %s; raft[1] = %v, commitindex = %v, state = %s; raft[2] = %v, commitindex = %v, state = %s;  raft[3] = %v, commitindex = %v, state = %s;  raft[4] = %v, commitindex = %v, state = %s, Thier term: &v, %v, %v, %v, %v.",
+						err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v.\n raft[0] = %v, commitindex = %v, state = %s; raft[1] = %v, commitindex = %v, state = %s; raft[2] = %v, commitindex = %v, state = %s;  raft[3] = %v, commitindex = %v, state = %s;  raft[4] = %v, commitindex = %v, state = %s, Their term: %v, %v, %v, %v, %v.",
 							m.Index, i, m.Command, j, old, cfg.rafts[0].me, cfg.rafts[0].CommitIndex, cfg.rafts[0].State, cfg.rafts[1].me, cfg.rafts[1].CommitIndex, cfg.rafts[1].State, cfg.rafts[2].me, cfg.rafts[2].CommitIndex, cfg.rafts[2].State, cfg.rafts[3].me, cfg.rafts[3].CommitIndex, cfg.rafts[3].State, cfg.rafts[4].me, cfg.rafts[4].CommitIndex, cfg.rafts[4].State, cfg.rafts[0].CurrentTerm, cfg.rafts[1].CurrentTerm, cfg.rafts[2].CurrentTerm,  cfg.rafts[3].CurrentTerm, cfg.rafts[4].CurrentTerm)
 							}
 				}

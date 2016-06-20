@@ -190,11 +190,11 @@ type AppendEntriesReply struct {
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	reply.Term = rf.CurrentTerm
 	
 	// Reply false if term < currentTerm
 	if args.Term < rf.CurrentTerm {
+	    rf.mu.Unlock()
 	    reply.VoteGranted = false
 	    return
 	}
@@ -219,6 +219,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 	    reply.VoteGranted = false
 	}
+	rf.mu.Unlock()
 	go rf.persist()
 	
 }
@@ -226,12 +227,12 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
         changed := false
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	reply.Term = rf.CurrentTerm
 	reply.ConflictEntry = args.PrevLogIndex + 1
 	
 	// reply false if term < currentTerm
 	if args.Term < rf.CurrentTerm {
+	    rf.mu.Unlock()
 	    reply.Success = false
 	    return
 	}
@@ -242,9 +243,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	    rf.VotedFor = -1
 	    rf.State = "Follower"
 	    changed = true
-	    rf.mu.Unlock()
 	    go func() { rf.ToFollower <- true } ()
-	    rf.mu.Lock()
 	}
 	
 	reply.Term = rf.CurrentTerm
@@ -260,9 +259,12 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		for ; fi > 0 && rf.Log[fi].Term == conflictTerm; fi-- {}
 		conflict = fi + 1
 	    }
+	    rf.mu.Unlock()
 	    reply.ConflictEntry = conflict
 	} else {
+	    newLastIndex := args.PrevLogIndex
 	    if len(args.Entries) > 0 {
+	        newLastIndex = args.Entries[len(args.Entries)-1].Index
 	        for _, e := range args.Entries {
 		    if len(rf.Log)-1 < e.Index {
 		        rf.Log = append(rf.Log, e)
@@ -273,15 +275,17 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		    changed = true
 		}
 	    }
-	    
 	    if args.LeaderCommit > rf.CommitIndex {
-	        if args.LeaderCommit > len(rf.Log)-1 {
-		    rf.CommitIndex = len(rf.Log)-1
+	        if args.LeaderCommit > newLastIndex {
+		    if newLastIndex > rf.CommitIndex {
+		        rf.CommitIndex = newLastIndex
+		    }
 		} else {
 		    rf.CommitIndex = args.LeaderCommit
 		}
 		go rf.processApplyChan()
 	    }
+	    rf.mu.Unlock()
 	    reply.Success = true
 	}
 	
@@ -373,9 +377,9 @@ func (rf *Raft) makeAppendEntriesArgs(index int) (AppendEntriesArgs, bool) {
      	args := AppendEntriesArgs{}
 	isleader := false
         rf.mu.Lock()
-        defer rf.mu.Unlock()
      
         if rf.State != "Leader" {
+	    rf.mu.Unlock()
             return args, isleader
         }
 
@@ -395,6 +399,7 @@ func (rf *Raft) makeAppendEntriesArgs(index int) (AppendEntriesArgs, bool) {
 	} else {
 	    args.Entries = make([]LogEntry, 0)
 	}
+	rf.mu.Unlock()
 	return args, isleader
 }
 
@@ -505,14 +510,16 @@ func (rf *Raft) CandidateState() {
     t := time.NewTimer(nexttimeout * time.Millisecond)
 
     VotesCollect := make(chan bool)
+    rf.mu.Lock()
     args := RequestVoteArgs{rf.CurrentTerm, rf.me, len(rf.Log)-1, rf.Log[len(rf.Log)-1].Term}
+    rf.mu.Unlock()
     for i := range rf.peers {
         if i != rf.me {
             go func(index int) {
 	        var reply = &RequestVoteReply{}
 		var ok = false
 		t1 := time.Now()
-	        for rf.NowState() == "Candidate" && time.Since(t1).Seconds() < 0.2 {
+	        for rf.NowState() == "Candidate" && time.Since(t1).Seconds() < 0.2 && rf.CurrentTerm == args.Term {
 		    // check RPC call every 10 millisecond. If not successful after 200 millisecond, then give up. Candidate may restart election
 		    // and timer.
 		    var ok1 = false
@@ -542,14 +549,16 @@ func (rf *Raft) CandidateState() {
 		    VotesCollect <- true
 		} else {
 		    rf.mu.Lock()
-		    defer rf.mu.Unlock()
 		    if reply.Term > rf.CurrentTerm {
 		        // if some server has higher term, then update currentTerm, changes to follower, and save state to persist.
 		        rf.CurrentTerm = reply.Term
 		        rf.VotedFor = -1
 			rf.State = "Follower"
+			rf.mu.Unlock()
 			go rf.persist()
 		    	go func() { rf.ToFollower <- true } ()
+		    } else {
+		        rf.mu.Unlock()
 		    }
 		}
 	    }(i)
@@ -585,12 +594,13 @@ func (rf *Raft) LeaderState() {
         rf.NextIndex[i] = len(rf.Log)
 	rf.MatchIndex[i] = 0
     }
+    currentTerm := rf.CurrentTerm
     rf.mu.Unlock()
     
     for i := range rf.peers {
         if i != rf.me {
 	    go func(index int) {
-	        for rf.NowState() == "Leader" {
+	        for rf.NowState() == "Leader" && rf.CurrentTerm == currentTerm {
 		    // if leader transform to follower while entering makeAppendEntriesArgs function, then do not send that request
 		    // and becomes to follower
 		    args, isleader := rf.makeAppendEntriesArgs(index)
@@ -623,7 +633,7 @@ func (rf *Raft) LeaderState() {
 func (rf *Raft) checkCommitIndex() {
      	 rf.mu.Lock()
 	 if rf.State == "Leader" {
-	     for N := len(rf.Log)-1; N > rf.CommitIndex && rf.Log[N].Term == rf.CurrentTerm; N-- {
+	     for N := len(rf.Log)-1; (N > rf.CommitIndex) && (rf.Log[N].Term == rf.CurrentTerm); N-- {
 	         ct := 1
 	         for i := range rf.peers {
 	             if rf.me != i && rf.MatchIndex[i] >= N {
@@ -634,18 +644,17 @@ func (rf *Raft) checkCommitIndex() {
 	             rf.CommitIndex = N
 		     break
 	         }
-	    }
-	}
-	rf.mu.Unlock()
-	// after updating commit index, apply the new committed entries.
-	go rf.processApplyChan()
+	     }
+	 }
+	 rf.mu.Unlock()
+	 // after updating commit index, apply the new committed entries.
+	 go rf.processApplyChan()
 }
 
 // after receiving from AppendEntries reply, leader should update itself according to reply message
 func (rf *Raft) processAppendReply(args AppendEntriesArgs, reply *AppendEntriesReply, index int) {
      	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if reply.Success {
+	if reply.Success && args.Term == rf.CurrentTerm  && rf.State == "Leader" {
 	    // if successful, update nextindex and matchindex for follower.
 	    // Because replies may be received out of order, so that nextindex should be guaranted not to decrease.
 	    // After modifying nextindex and matchindex, refresh leader's commitindex.
@@ -654,10 +663,11 @@ func (rf *Raft) processAppendReply(args AppendEntriesArgs, reply *AppendEntriesR
 		    rf.NextIndex[index] = args.Entries[len(args.Entries)-1].Index + 1
 		    rf.MatchIndex[index] = rf.NextIndex[index]-1
 		}
-		if rf.CommitIndex < rf.MatchIndex[index] && rf.State == "Leader" {
+		if rf.CommitIndex < rf.MatchIndex[index] {
 		    go rf.checkCommitIndex()
 		}
 	    }
+	    rf.mu.Unlock()
 	} else {
 	    // update currentTerm according to follower's term, and might transfer to follower.
 	    // or update nextindex according to conflictentry sent by follower.
@@ -665,10 +675,17 @@ func (rf *Raft) processAppendReply(args AppendEntriesArgs, reply *AppendEntriesR
 		rf.CurrentTerm = reply.Term
 		rf.VotedFor = -1
 		rf.State = "Follower"
+		rf.mu.Unlock()
 		go func() { rf.ToFollower <- true } ()
 		go rf.persist()
-	    } else {
+		rf.mu.Lock()
+	    }
+	    
+	    if rf.State == "Leader" && args.Term == rf.CurrentTerm && args.Term >= reply.Term {
                 rf.NextIndex[index] = reply.ConflictEntry
+		rf.mu.Unlock()
+	    } else {
+	        rf.mu.Unlock()
 	    }
 	}
 }
