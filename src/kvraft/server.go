@@ -44,7 +44,6 @@ type RaftKV struct {
 	data           map[string]string
 	executedID     map[int64]int
 	notify         map[int][]chan Op
-	committedEntry int
 	appliedEntry  int
 
 }
@@ -82,10 +81,10 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	    case executedOp = <- notifyMe:
 	        notified = true
 	        break
-	    case <- time.After(5*time.Millisecond):
+	    case <- time.After(10*time.Millisecond):
 	        kv.mu.Lock()
 	        if currentTerm, _ := kv.rf.GetState(); term != currentTerm {
-		    if kv.committedEntry < index {
+		    if kv.appliedEntry < index {
 		        reply.WrongLeader = true
 			delete(kv.notify, index)
 			kv.mu.Unlock()
@@ -149,10 +148,10 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	    case executedOp = <- notifyMe:
 	        notified = true
 	        break
-	    case <- time.After(5*time.Millisecond):
+	    case <- time.After(10*time.Millisecond):
 	        kv.mu.Lock()
 	        if currentTerm, _ := kv.rf.GetState(); term != currentTerm {
-		    if kv.committedEntry < index {
+		    if kv.appliedEntry < index {
 		        reply.WrongLeader = true
 			delete(kv.notify, index)
 		        kv.mu.Unlock()
@@ -219,40 +218,24 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.data = make(map[string]string)
 	kv.executedID = make(map[int64]int)
 	kv.notify = make(map[int][]chan Op)
-	kv.committedEntry = 0
 	kv.appliedEntry = 0
 	go func() {
 	    for range kv.applyCh {
 	        ////fmt.Printf("Receive apply msg, server:%d, client:%d, seq:%d, index:%d\n", kv.me, msg.Command.(Op).Client, msg.Command.(Op).Sequence, msg.Index)
-	       // go kv.applyCommand(msg)
-	       go kv.addCommittedEntry()
-	    //   go kv.checkAppliedEntry()
+	        go kv.apply()
 	    }
 	} ()
 	
 	return kv
 }
 
-func (kv *RaftKV) addCommittedEntry() {
+func (kv *RaftKV) apply() {
     kv.mu.Lock()
-    kv.committedEntry++
-    ////fmt.Printf("Server %d commit index increase to %d\n", kv.me, kv.committedEntry)
-  //  kv.mu.Unlock()
-    kv.checkAppliedEntry()
+    kv.appliedEntry++
+    msg := raft.ApplyMsg{Index: kv.appliedEntry, Command: kv.rf.Log[kv.appliedEntry].Command}
+    kv.applyCommand(msg)
     kv.mu.Unlock()
-    ////fmt.Printf("%d release the lock\n", kv.me)
-}
-
-func (kv *RaftKV) checkAppliedEntry() {
-//    kv.mu.Lock()
-    for kv.appliedEntry < kv.committedEntry {
-        kv.appliedEntry++
-        msg := raft.ApplyMsg{Index: kv.appliedEntry, Command: kv.rf.Log[kv.appliedEntry].Command}
-	kv.applyCommand(msg)
-	////fmt.Printf("Server %d after apply apply entry:%d, commit:%d \n", kv.me, kv.appliedEntry, kv.committedEntry)
-    }
-//    kv.mu.Unlock()
-//    ////fmt.Printf("%d release the lock\n", kv.me)
+    
 }
 
 func (kv *RaftKV) applyCommand(msg raft.ApplyMsg) {
@@ -316,10 +299,10 @@ func (kv *RaftKV) applyCommand(msg raft.ApplyMsg) {
     
 //    kv.mu.Unlock()
     for _,  c := range kv.notify[logIndex] {
-        tmp := Op{res.Client, res.Sequence, res.Key, res.Value, res.Type, res.Err}
+       // tmp := Op{res.Client, res.Sequence, res.Key, res.Value, res.Type, res.Err}
 	////fmt.Printf("-----------------------tmp made and put on channel in  server %d, client:%d, seq:%d\n", kv.me, clientID, opSequence)
 	kv.mu.Unlock()
-        c <- tmp
+        c <- res
 	kv.mu.Lock()
 	////fmt.Printf("Channel taken on server %d, client:%d, seq:%d\n", kv.me, clientID, opSequence)
     }
