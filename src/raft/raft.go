@@ -188,6 +188,7 @@ type AppendEntriesReply struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
+        defer rf.persist()
 	// Your code here.
 	rf.mu.Lock()
 	reply.Term = rf.CurrentTerm
@@ -219,13 +220,15 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 	    reply.VoteGranted = false
 	}
+//	rf.persist()
 	rf.mu.Unlock()
-	go rf.persist()
+//	go rf.persist()
 	
 }
 
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
         changed := false
+	
 	rf.mu.Lock()
 	reply.Term = rf.CurrentTerm
 	reply.ConflictEntry = args.PrevLogIndex + 1
@@ -274,9 +277,10 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		    }
 		    changed = true
 		}
+	//	fmt.Println(rf.me, "'s last log index is ", args.Entries[len(args.Entries)-1].Index, " and length is: ", len(rf.Log))
 	    }
 	    if args.LeaderCommit > rf.CommitIndex {
-	        if args.LeaderCommit > newLastIndex {
+	        if args.LeaderCommit > newLastIndex && newLastIndex > rf.CommitIndex {
 		    if newLastIndex > rf.CommitIndex {
 		        rf.CommitIndex = newLastIndex
 		    }
@@ -290,7 +294,10 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	}
 	
 	if changed {
-	    go rf.persist()
+//	    go rf.persist()
+         //   rf.mu.Lock()
+            rf.persist()
+	   // rf.mu.Unlock()
 	}
 }
 
@@ -338,10 +345,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := true
-
+       
         rf.mu.Lock()
-	defer rf.mu.Unlock()
+
         if rf.State != "Leader" {
+	    rf.mu.Unlock()
 	    isLeader = false
 	} else {
 	    entry := LogEntry{len(rf.Log), command, rf.CurrentTerm}
@@ -349,7 +357,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	    index = len(rf.Log)-1
 	    term = rf.CurrentTerm
 	    go rf.Broadcast()
-	    go rf.persist()
+	    rf.mu.Unlock()
+	    rf.persist()
+//	    go rf.persist()
 	}
 
 	return index, term, isLeader
@@ -502,7 +512,8 @@ func (rf *Raft) CandidateState() {
     rf.VotedFor = rf.me
     rf.mu.Unlock()
     
-    go rf.persist()
+    rf.persist()
+//    go rf.persist()
     
     electiontimeout := 200
     randomized  := electiontimeout + rand.Intn(electiontimeout)
@@ -555,8 +566,9 @@ func (rf *Raft) CandidateState() {
 		        rf.VotedFor = -1
 			rf.State = "Follower"
 			rf.mu.Unlock()
-			go rf.persist()
+		//	go rf.persist()
 		    	go func() { rf.ToFollower <- true } ()
+			rf.persist()
 		    } else {
 		        rf.mu.Unlock()
 		    }
@@ -596,7 +608,7 @@ func (rf *Raft) LeaderState() {
     }
     currentTerm := rf.CurrentTerm
     rf.mu.Unlock()
-    
+//  fmt.Println(rf.me, " becomes leader")
     for i := range rf.peers {
         if i != rf.me {
 	    go func(index int) {
@@ -642,6 +654,11 @@ func (rf *Raft) checkCommitIndex() {
 	         }
 	         if ct > len(rf.peers)/2 {
 	             rf.CommitIndex = N
+		   //  fmt.Println("CommitIndex becomes: ", N)
+		   //  for i := range rf.peers {
+		     //    fmt.Printf("%d", rf.MatchIndex[i])
+		    // }
+		    // fmt.Printf("\n")
 		     break
 	         }
 	     }
@@ -653,6 +670,7 @@ func (rf *Raft) checkCommitIndex() {
 
 // after receiving from AppendEntries reply, leader should update itself according to reply message
 func (rf *Raft) processAppendReply(args AppendEntriesArgs, reply *AppendEntriesReply, index int) {
+	
      	rf.mu.Lock()
 	if reply.Success && args.Term == rf.CurrentTerm  && rf.State == "Leader" {
 	    // if successful, update nextindex and matchindex for follower.
@@ -677,7 +695,8 @@ func (rf *Raft) processAppendReply(args AppendEntriesArgs, reply *AppendEntriesR
 		rf.State = "Follower"
 		rf.mu.Unlock()
 		go func() { rf.ToFollower <- true } ()
-		go rf.persist()
+	//	go rf.persist()
+	        rf.persist()
 		rf.mu.Lock()
 	    }
 	    
@@ -698,6 +717,7 @@ func (rf *Raft) processApplyChan() {
 	    msg := ApplyMsg{}
 	    msg.Index = rf.LastApplied
 	    msg.Command = rf.Log[rf.LastApplied].Command
+//	    fmt.Println(rf.me, " send msg ", msg.Index," to channel")
 	    rf.ApplyCH <- msg
 	}
 	rf.mu.Unlock()
