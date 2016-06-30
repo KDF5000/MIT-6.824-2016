@@ -75,6 +75,7 @@ type Raft struct {
         HeartBeatCH   chan bool
 	ToFollower    chan bool
 	ApplyCH       chan ApplyMsg
+	QuitCH        chan bool
 
 }
 
@@ -427,6 +428,7 @@ func (rf *Raft) NowState() string {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	close(rf.QuitCH)
 }
 
 //
@@ -454,6 +456,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.HeartBeatCH = make(chan bool)
 	rf.ToFollower = make(chan bool)
 	rf.ApplyCH = applyCh
+	rf.QuitCH = make(chan bool)
 	
 	// Persistent State
 	rf.CurrentTerm = 0
@@ -463,16 +466,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+        
         go func() {
-            for {	        
+	    active := true
+            for active{	        
 	        switch rf.NowState() {
 	        case "Follower":
-	            rf.FollowerState()
+	            rf.FollowerState(&active)
 	        case "Candidate":
-	            rf.CandidateState()
+	            rf.CandidateState(&active)
 	        case "Leader":
-	            rf.LeaderState()
+	            rf.LeaderState(&active)
 	        }
 	    }
 	}()
@@ -480,7 +484,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-func (rf *Raft) FollowerState() {
+func (rf *Raft) FollowerState(active *bool) {
     
     electiontimeout := 200
     randomized := electiontimeout + rand.Intn(electiontimeout)
@@ -499,11 +503,14 @@ func (rf *Raft) FollowerState() {
 	    t.Reset(nexttimeout * time.Millisecond)
 	case <- rf.ToFollower:
 	    continue
+	case <- rf.QuitCH:
+	    *active = false
+	    return
 	}
     }
 }
 
-func (rf *Raft) CandidateState() {
+func (rf *Raft) CandidateState(active *bool) {
 
     rf.mu.Lock()
     // increase currentTerm, and vote for self
@@ -593,11 +600,14 @@ func (rf *Raft) CandidateState() {
 	        return
 	    case <- rf.HeartBeatCH:
 	        continue
+	    case <- rf.QuitCH:
+	        *active = false
+		return
 	}
     }
 }
 
-func (rf *Raft) LeaderState() {
+func (rf *Raft) LeaderState(active *bool) {
 
     rf.mu.Lock()
     rf.NextIndex = make([]int, len(rf.peers))
@@ -609,23 +619,29 @@ func (rf *Raft) LeaderState() {
     currentTerm := rf.CurrentTerm
     rf.mu.Unlock()
 //  fmt.Println(rf.me, " becomes leader")
+    rf.Broadcast()
     for i := range rf.peers {
         if i != rf.me {
 	    go func(index int) {
 	        for rf.NowState() == "Leader" && rf.CurrentTerm == currentTerm {
 		    // if leader transform to follower while entering makeAppendEntriesArgs function, then do not send that request
 		    // and becomes to follower
-		    args, isleader := rf.makeAppendEntriesArgs(index)
-		    reply := &AppendEntriesReply{}
-		    if !isleader {
+		    select {
+		    case <- time.After(60*time.Millisecond):
+		        args, isleader := rf.makeAppendEntriesArgs(index)
+		        reply := &AppendEntriesReply{}
+		        if !isleader {
+		            return
+		        }
+		        go func() {
+		            if ok := rf.sendAppendEntries(index, args, reply); ok {
+			        rf.processAppendReply(args, reply, index)
+		            }
+		        } ()
+		        //time.Sleep(60*time.Millisecond)
+		    case <- rf.QuitCH:
 		        return
 		    }
-		    go func() {
-		        if ok := rf.sendAppendEntries(index, args, reply); ok {
-			    rf.processAppendReply(args, reply, index)
-		        }
-		    } ()
-		    time.Sleep(60*time.Millisecond)
 		}
 	    } (i)
 	}
@@ -637,6 +653,9 @@ func (rf *Raft) LeaderState() {
 	    return
 	case <- rf.HeartBeatCH:
 	    continue
+	case <- rf.QuitCH:
+	    *active = false
+	    return
 	}
     }
 }

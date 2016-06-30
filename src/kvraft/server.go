@@ -8,6 +8,7 @@ import (
 	"sync"
 //	"fmt"
 	"time"
+	"container/list"
 )
 
 const Debug = 1
@@ -44,7 +45,11 @@ type RaftKV struct {
 	data           map[string]string
 	executedID     map[int64]int
 	notify         map[int][]chan Op
-	appliedEntry  int
+	appliedEntry   int
+	
+	Recv           chan raft.ApplyMsg
+	Msgs           *list.List
+	QuitCH         chan bool
 
 }
 
@@ -187,6 +192,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *RaftKV) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
+	close(kv.QuitCH)
 }
 
 //
@@ -219,10 +225,47 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.executedID = make(map[int64]int)
 	kv.notify = make(map[int][]chan Op)
 	kv.appliedEntry = 0
+	
+	kv.QuitCH = make(chan bool)
+	kv.Msgs = list.New()
+	kv.Recv = make(chan raft.ApplyMsg)
+	
 	go func() {
-	    for range kv.applyCh {
+	//    for range kv.applyCh {
 	        ////fmt.Printf("Receive apply msg, server:%d, client:%d, seq:%d, index:%d\n", kv.me, msg.Command.(Op).Client, msg.Command.(Op).Sequence, msg.Index)
-	        go kv.apply()
+	  //      go kv.apply()
+	       
+	   // }
+	   for {
+	       var (
+	           recvChan chan raft.ApplyMsg
+	   	      recvVal  raft.ApplyMsg
+	       )
+	       if kv.Msgs.Len() > 0 {
+	           recvChan = kv.Recv
+	   	      recvVal = kv.Msgs.Front().Value.(raft.ApplyMsg)
+	       }
+	       select {
+	       case msg := <- kv.applyCh:
+	   	      kv.Msgs.PushBack(msg)
+	       case recvChan <- recvVal:
+	   	      kv.Msgs.Remove(kv.Msgs.Front())
+	       case <- kv.QuitCH:
+	           return
+	       }
+	   }
+	} ()
+	
+	go func() {
+	  for {
+	     select {
+		case msg := <- kv.Recv:
+		    kv.mu.Lock()
+		    kv.applyCommand(msg)
+		    kv.mu.Unlock()
+		case <- kv.QuitCH:
+		    return
+		}
 	    }
 	} ()
 	
