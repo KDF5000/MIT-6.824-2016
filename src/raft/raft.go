@@ -76,6 +76,7 @@ type Raft struct {
 	ToFollower    chan bool
 	ApplyCH       chan ApplyMsg
 	QuitCH        chan bool
+	active        bool
 
 }
 
@@ -206,7 +207,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	    rf.CurrentTerm = args.Term
 	    rf.VotedFor = -1
 	    rf.State = "Follower"
-	    go func() { rf.ToFollower <- true } ()
+	    go func() { <- rf.ToFollower} ()
 	}
 
 	// if votedFor is null or candidateId, and candidate's log is at least as up-to-date as receiver's log, grant vote
@@ -216,7 +217,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if (rf.VotedFor == -1 || rf.VotedFor == args.CandidateId) &&
 	   ((logTerm < args.LastLogTerm) || (logTerm == args.LastLogTerm && logIndex <= args.LastLogIndex)) {
 	    rf.VotedFor = args.CandidateId
-	    go func() { rf.HeartBeatCH <- true } ()
+	    go func() { <- rf.HeartBeatCH } ()
 	    reply.VoteGranted = true
 	} else {
 	    reply.VoteGranted = false
@@ -241,13 +242,13 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	    return
 	}
 
-	go func() { rf.HeartBeatCH <- true } ()
+	go func() { <- rf.HeartBeatCH } ()
 	if rf.CurrentTerm < args.Term {
 	    rf.CurrentTerm = args.Term
 	    rf.VotedFor = -1
 	    rf.State = "Follower"
 	    changed = true
-	    go func() { rf.ToFollower <- true } ()
+	    go func() { <- rf.ToFollower} ()
 	}
 	
 	reply.Term = rf.CurrentTerm
@@ -463,20 +464,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.VotedFor = -1
 	rf.Log = make([]LogEntry, 1)
 	rf.Log[0] = LogEntry{0, 0, 0}
+	rf.active = true
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
         
         go func() {
-	    active := true
-            for active{	        
+            for rf.active {	        
 	        switch rf.NowState() {
 	        case "Follower":
-	            rf.FollowerState(&active)
+	            rf.FollowerState()
 	        case "Candidate":
-	            rf.CandidateState(&active)
+	            rf.CandidateState()
 	        case "Leader":
-	            rf.LeaderState(&active)
+	            rf.LeaderState()
 	        }
 	    }
 	}()
@@ -484,7 +485,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-func (rf *Raft) FollowerState(active *bool) {
+func (rf *Raft) FollowerState() {
+    if !rf.active {
+        return
+    }
     
     electiontimeout := 200
     randomized := electiontimeout + rand.Intn(electiontimeout)
@@ -497,20 +501,27 @@ func (rf *Raft) FollowerState(active *bool) {
 	    rf.State = "Candidate"
 	    rf.mu.Unlock()
 	    return
-	case <- rf.HeartBeatCH:
+	case rf.HeartBeatCH <- true:
 	    randomized  = electiontimeout + rand.Intn(electiontimeout)
 	    nexttimeout = time.Duration(randomized)
 	    t.Reset(nexttimeout * time.Millisecond)
-	case <- rf.ToFollower:
+	case rf.ToFollower <- true:
 	    continue
 	case <- rf.QuitCH:
-	    *active = false
+	    rf.mu.Lock()
+	    rf.active = false
+	    close(rf.HeartBeatCH)
+	    close(rf.ToFollower)
+	    rf.mu.Unlock()
 	    return
 	}
     }
 }
 
-func (rf *Raft) CandidateState(active *bool) {
+func (rf *Raft) CandidateState() {
+    if !rf.active {
+        return
+    }
 
     rf.mu.Lock()
     // increase currentTerm, and vote for self
@@ -564,7 +575,7 @@ func (rf *Raft) CandidateState(active *bool) {
 		}
 		
 		if reply.VoteGranted {
-		    VotesCollect <- true
+		    <- VotesCollect
 		} else {
 		    rf.mu.Lock()
 		    if reply.Term > rf.CurrentTerm {
@@ -574,7 +585,7 @@ func (rf *Raft) CandidateState(active *bool) {
 			rf.State = "Follower"
 			rf.mu.Unlock()
 		//	go rf.persist()
-		    	go func() { rf.ToFollower <- true } ()
+		    	go func() { <- rf.ToFollower } ()
 			rf.persist()
 		    } else {
 		        rf.mu.Unlock()
@@ -588,26 +599,35 @@ func (rf *Raft) CandidateState(active *bool) {
         select {
             case <- t.C:
 	        return
-	    case <- VotesCollect:
+	    case VotesCollect <- true:
 		totalVotes++
 		if totalVotes > len(rf.peers)/2 {
 		    rf.mu.Lock()
-		    rf.State = "Leader" 
+		    rf.State = "Leader"
+		    close(VotesCollect)
 		    rf.mu.Unlock()
 		    return
 		}
-	    case <- rf.ToFollower:
+	    case rf.ToFollower <- true:
 	        return
-	    case <- rf.HeartBeatCH:
+	    case rf.HeartBeatCH <- true:
 	        continue
 	    case <- rf.QuitCH:
-	        *active = false
+	        rf.mu.Lock()
+	        rf.active = false
+		close(rf.HeartBeatCH)
+		close(rf.ToFollower)
+		close(VotesCollect)
+		rf.mu.Unlock()
 		return
 	}
     }
 }
 
-func (rf *Raft) LeaderState(active *bool) {
+func (rf *Raft) LeaderState() {
+    if !rf.active {
+        return
+    }
 
     rf.mu.Lock()
     rf.NextIndex = make([]int, len(rf.peers))
@@ -649,12 +669,16 @@ func (rf *Raft) LeaderState(active *bool) {
 
     for rf.NowState() == "Leader" {
         select {
-	case <- rf.ToFollower:
+	case rf.ToFollower <- true:
 	    return
-	case <- rf.HeartBeatCH:
+	case rf.HeartBeatCH <- true:
 	    continue
 	case <- rf.QuitCH:
-	    *active = false
+	    rf.mu.Lock()
+	    rf.active = false
+	    close(rf.HeartBeatCH)
+	    close(rf.ToFollower)
+	    rf.mu.Unlock()
 	    return
 	}
     }
@@ -713,7 +737,7 @@ func (rf *Raft) processAppendReply(args AppendEntriesArgs, reply *AppendEntriesR
 		rf.VotedFor = -1
 		rf.State = "Follower"
 		rf.mu.Unlock()
-		go func() { rf.ToFollower <- true } ()
+		go func() { <- rf.ToFollower} ()
 	//	go rf.persist()
 	        rf.persist()
 		rf.mu.Lock()

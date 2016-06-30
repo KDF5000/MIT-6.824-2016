@@ -232,7 +232,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	
 	go func() {
 	//    for range kv.applyCh {
-	        ////fmt.Printf("Receive apply msg, server:%d, client:%d, seq:%d, index:%d\n", kv.me, msg.Command.(Op).Client, msg.Command.(Op).Sequence, msg.Index)
+//	        ////fmt.Printf("Receive apply msg, server:%d, client:%d, seq:%d, index:%d\n", kv.me, msg.Command.(Op).Client, msg.Command.(Op).Sequence, msg.Index)
 	  //      go kv.apply()
 	       
 	   // }
@@ -248,8 +248,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	       select {
 	       case msg := <- kv.applyCh:
 	   	      kv.Msgs.PushBack(msg)
+		      kv.appliedEntry++
+		      ////fmt.Println(kv.me, " append list at index:", msg.Index)
 	       case recvChan <- recvVal:
 	   	      kv.Msgs.Remove(kv.Msgs.Front())
+		      ////fmt.Println(kv.me, " receiving command at index:", recvVal.Index)
 	       case <- kv.QuitCH:
 	           return
 	       }
@@ -260,9 +263,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	  for {
 	     select {
 		case msg := <- kv.Recv:
+		    ////fmt.Println(kv.me, " is acquire kv.Recv lock")
 		    kv.mu.Lock()
+		    ////fmt.Println(kv.me, " applying command at index:", msg.Index)
+		   // kv.appliedEntry++
 		    kv.applyCommand(msg)
 		    kv.mu.Unlock()
+		    ////fmt.Println(kv.me, " release locks")
 		case <- kv.QuitCH:
 		    return
 		}
@@ -305,8 +312,8 @@ func (kv *RaftKV) applyCommand(msg raft.ApplyMsg) {
 	    } else {
 	        res.Value = v
 	    }
-	    ////fmt.Printf("Server:%d Get Value applied Client:%d, Seq: %d. Key:%s, Value:%s\n", kv.me, clientID, opSequence, op.Key, op.Value)
-//	    ////fmt.Printf("Server:%d Get Value applied Client:%d, Seq: %d. Key:%s\n", kv.me, clientID, opSequence, op.Key)
+//	    ////fmt.Printf("Server:%d Get Value applied Client:%d, Seq: %d. Key:%s, Value:%s\n", kv.me, clientID, opSequence, op.Key, op.Value)
+	    ////fmt.Printf("Server:%d Get Value applied Client:%d, Seq: %d. Key:%s\n", kv.me, clientID, opSequence, op.Key)
 	case "Put":
 	    kv.data[op.Key] = op.Value
 	    ////fmt.Printf("Server:%d Put Value applied Client:%d, Seq: %d. Key:%s, Value:%s\n", kv.me, clientID, opSequence, op.Key, op.Value)
@@ -317,8 +324,8 @@ func (kv *RaftKV) applyCommand(msg raft.ApplyMsg) {
 	    } else {
 	        kv.data[op.Key] += op.Value
 	    }
-//	    ////fmt.Printf("Server %d Append Value applied Client:%d, Seq: %d. Key:%s, append:%s\n", kv.me, clientID, opSequence, op.Key, op.Value)
-	    ////fmt.Printf("Server %d Append Value applied Client:%d, Seq: %d.Key:%s, ValueAfterAppend:%s, append:%s\n", kv.me, clientID, opSequence, op.Key, kv.data[op.Key], op.Value)
+	    ////fmt.Printf("Server %d Append Value applied Client:%d, Seq: %d. Key:%s, append:%s\n", kv.me, clientID, opSequence, op.Key, op.Value)
+//	    ////fmt.Printf("Server %d Append Value applied Client:%d, Seq: %d.Key:%s, ValueAfterAppend:%s, append:%s\n", kv.me, clientID, opSequence, op.Key, kv.data[op.Key], op.Value)
 	}
 	kv.executedID[clientID] = opSequence
     } else {
