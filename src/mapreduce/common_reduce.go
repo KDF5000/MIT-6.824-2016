@@ -40,15 +40,15 @@ func doReduce(
 	files := make([](*os.File), nMap)
 	m := make(map[string][]string)
 	for i := 0; i < nMap; i++ {
-	    name := reduceName(jobName, i, reduceTaskNumber)
-	    files[i], _ = os.Open(name)
-	    dec[i] = json.NewDecoder(files[i])
-	    for {
-	        var kv KeyValue
-		err := dec[i].Decode(&kv)
-		if err != nil { break }
-		m[kv.Key] = append(m[kv.Key], kv.Value)
-	    }
+		name := reduceName(jobName, i, reduceTaskNumber)
+		files[i], _ = os.Open(name)
+		dec[i] = json.NewDecoder(files[i])
+		for {
+			var kv KeyValue
+			err := dec[i].Decode(&kv)
+			if err != nil { break }
+			m[kv.Key] = append(m[kv.Key], kv.Value)
+		}
 	}
 	
 	name := mergeName(jobName, reduceTaskNumber)

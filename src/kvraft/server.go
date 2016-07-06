@@ -6,9 +6,10 @@ import (
 	"log"
 	"raft"
 	"sync"
-//	"fmt"
+	"fmt"
 	"time"
 	"container/list"
+	"bytes"
 )
 
 const Debug = 1
@@ -42,37 +43,96 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	persister      *raft.Persister
 	data           map[string]string
 	executedID     map[int64]int
 	notify         map[int][]chan Op
-	appliedEntry   int
 	
 	Recv           chan raft.ApplyMsg
 	Msgs           *list.List
 	QuitCH         chan bool
+	
+	lastIncludedIndex int
+	lastIncludedTerm  int
 
 }
 
+func (kv *RaftKV) persist() (int, int, bool) {
+	// Your code here.
+	// Example:
+	// w := new(bytes.Buffer)
+	// e := gob.NewEncoder(w)
+	// e.Encode(rf.xxx)
+	// e.Encode(rf.yyy)
+	// data := w.Bytes()
+	// rf.persister.SaveRaftState(data)
+
+	lastIncludedIndex := 0
+	lastIncludedTerm := 0
+	r := bytes.NewBuffer(kv.persister.ReadSnapshot())
+	d := gob.NewDecoder(r)
+	d.Decode(&lastIncludedIndex)
+	d.Decode(&lastIncludedTerm)
+	
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	kv.mu.Lock()
+	
+	index := kv.lastIncludedIndex
+	term := kv.lastIncludedTerm
+	
+	if lastIncludedIndex >= index {
+		kv.mu.Unlock()
+		return index, term, false
+	}
+
+	e.Encode(kv.lastIncludedIndex)
+	e.Encode(kv.lastIncludedTerm)
+	e.Encode(kv.data)
+	e.Encode(kv.executedID)
+	data := w.Bytes()
+	kv.persister.SaveSnapshot(data)
+//	kv.rf.CutLog(index, term)
+	kv.mu.Unlock()
+	return index, term, true
+}
+
+func (kv *RaftKV) readPersist(data []byte) {
+	// Your code here.
+	// Example:
+	// r := bytes.NewBuffer(data)
+	// d := gob.NewDecoder(r)
+	// d.Decode(&rf.xxx)
+	// d.Decode(&rf.yyy)
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+//	kv.mu.Lock()
+	d.Decode(&kv.lastIncludedIndex)
+	d.Decode(&kv.lastIncludedTerm)
+	d.Decode(&kv.data)
+	d.Decode(&kv.executedID)
+//	kv.mu.Unlock()	   
+}
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	op := Op{args.Client, args.Sequence, args.Key, "", "Get", ""}
 	kv.mu.Lock()
 	if _, ok := kv.executedID[args.Client]; !ok {
-	    kv.executedID[args.Client] = -1
+		kv.executedID[args.Client] = -1
 	}
 	index, term, isLeader := kv.rf.Start(op)
 	if !isLeader {
-	    kv.mu.Unlock()
-	    reply.WrongLeader = true
-	    ////fmt.Printf("%d is not leader.\n", kv.me)
-	    return
+		kv.mu.Unlock()
+		reply.WrongLeader = true
+		////fmt.Printf("%d is not leader.\n", kv.me)
+		return
 	}
 	////fmt.Printf("Client %d Call server %d Get Key Seq: %d, log index: %d\n", args.Client, kv.me,  args.Sequence, index)
 	////fmt.Printf("%d is leader\n", kv.me)
 	if _, ok := kv.notify[index]; !ok {
-	    kv.notify[index] = make([]chan Op, 0)
-	    ////fmt.Printf("Client %d make notification channel on server %d in log index %d\n", args.Client, kv.me, index)
+		kv.notify[index] = make([]chan Op, 0)
+		////fmt.Printf("Client %d make notification channel on server %d in log index %d\n", args.Client, kv.me, index)
 	}
 	notifyMe := make(chan Op)
 	kv.notify[index] = append(kv.notify[index], notifyMe)
@@ -82,39 +142,41 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	var executedOp Op
 	var notified = false
 	for {
-	    select {
-	    case executedOp = <- notifyMe:
-	        notified = true
-	        break
-	    case <- time.After(10*time.Millisecond):
-	        kv.mu.Lock()
-	        if currentTerm, _ := kv.rf.GetState(); term != currentTerm {
-		    if kv.appliedEntry < index {
-		        reply.WrongLeader = true
-			delete(kv.notify, index)
+		select {
+		case executedOp = <- notifyMe:
+			notified = true
+			break
+		case <- time.After(10*time.Millisecond):
+			kv.mu.Lock()
+			if currentTerm, _ := kv.rf.GetState(); term != currentTerm {
+				if kv.lastIncludedIndex < index {
+					reply.WrongLeader = true
+					delete(kv.notify, index)
+					kv.mu.Unlock()
+					return
+				}
+			}
 			kv.mu.Unlock()
+		case <- kv.QuitCH:
+			reply.Err = "ServerFail"
 			return
-		    }
 		}
-		kv.mu.Unlock()
-	    }
-	    if notified {
-	        break
-	    }
+		if notified {
+			break
+		}
 	}
-	
-//	executedOp := <- notifyMe
+	// executedOp := <- notifyMe
 	////fmt.Printf("Client %d Seq %d Commited on server %d\n", args.Client, args.Sequence, kv.me)
 	reply.WrongLeader = false
 	if executedOp.Client != op.Client || executedOp.Sequence != op.Sequence {
-	    reply.Err = "FailCommit"
+		reply.Err = "FailCommit"
 	} else {
-	    if executedOp.Err == ErrNoKey {
-	        reply.Err = ErrNoKey
-	    } else {
-	        reply.Value = executedOp.Value
-		reply.Err = OK
-	    }
+		if executedOp.Err == ErrNoKey {
+			reply.Err = ErrNoKey
+		} else {
+			reply.Value = executedOp.Value
+			reply.Err = OK
+		}
 	}
 	////fmt.Printf("reply.WrongLeader: %t, reply.Err: %s, server: %d\n", reply.WrongLeader, reply.Err, kv.me)
 	return
@@ -125,60 +187,62 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	op := Op{args.Client, args.Sequence, args.Key, args.Value, args.Op, ""}
 	kv.mu.Lock()
 	if _, ok := kv.executedID[args.Client]; !ok {
-	    ////fmt.Printf("Client %d set seq as -1 on server %d\n", args.Client, kv.me)
-	    kv.executedID[args.Client] = -1
+		////fmt.Printf("Client %d set seq as -1 on server %d\n", args.Client, kv.me)
+		kv.executedID[args.Client] = -1
 	}
 	index, term, isLeader := kv.rf.Start(op)
 	if !isLeader {
-	    kv.mu.Unlock()
-	    reply.WrongLeader = true
-	    ////fmt.Printf("%d is not leader.\n", kv.me)
-	    return
+		kv.mu.Unlock()
+		reply.WrongLeader = true
+		////fmt.Printf("%d is not leader.\n", kv.me)
+		return
 	}
-	////fmt.Printf("Client %d Call server PutAppend: %s, Seq: %d, log index: %d\n", args.Client, args.Op, args.Sequence, index)
+	// fmt.Printf("Client %d Call server PutAppend: %s, Seq: %d, log index: %d\n", args.Client, args.Op, args.Sequence, index)
 	////fmt.Printf("%d is leader\n", kv.me)
 	if _, ok := kv.notify[index]; !ok {
-	    kv.notify[index] = make([]chan Op, 0)
-	    ////fmt.Printf("Client %d make notification channel on server %d in log index %d\n", args.Client, kv.me, index)
+		kv.notify[index] = make([]chan Op, 0)
+		////fmt.Printf("Client %d make notification channel on server %d in log index %d\n", args.Client, kv.me, index)
 	}
 	notifyMe := make(chan Op)
 	kv.notify[index] = append(kv.notify[index], notifyMe)
 	kv.mu.Unlock()
-	////fmt.Printf("%d is waiting for commit command Client:%d, Seq:%d \n", kv.me, args.Client, args.Sequence)
+	// fmt.Printf("%d is waiting for commit command Client:%d, Seq:%d \n", kv.me, args.Client, args.Sequence)
 	
 	var executedOp Op
 	notified := false
 	for {
-	    select {
-	    case executedOp = <- notifyMe:
-	        notified = true
-	        break
-	    case <- time.After(10*time.Millisecond):
-	        kv.mu.Lock()
-	        if currentTerm, _ := kv.rf.GetState(); term != currentTerm {
-		    if kv.appliedEntry < index {
-		        reply.WrongLeader = true
-			delete(kv.notify, index)
-		        kv.mu.Unlock()
-		        return
-		    }
+		select {
+		case executedOp = <- notifyMe:
+			notified = true
+			break
+		case <- time.After(10*time.Millisecond):
+			kv.mu.Lock()
+			if currentTerm, _ := kv.rf.GetState(); term != currentTerm {
+				if kv.lastIncludedIndex < index {
+					reply.WrongLeader = true
+					delete(kv.notify, index)
+					kv.mu.Unlock()
+					return
+				}
+			}
+			kv.mu.Unlock()
+		case <- kv.QuitCH:
+			reply.Err = "ServerFail"
+			return
 		}
-		kv.mu.Unlock()
-	    }
-	    if notified {
-	        break
-	    }
+		if notified {
+			break
+		}
 	}
-
-//	executedOp := <- notifyMe
+	// executedOp := <- notifyMe
 
 	////fmt.Printf("Client %d Seq %d Commited on server %d\n", args.Client, args.Sequence, kv.me)
 	reply.WrongLeader = false
 	////fmt.Printf("-------------------------------%t\n", reply.WrongLeader)
 	if executedOp.Client != op.Client || executedOp.Sequence != op.Sequence {
-	    reply.Err = "FailCommit"
+		reply.Err = "FailCommit"
 	} else {
-	    reply.Err = OK
+		reply.Err = OK
 	}
 	////fmt.Printf("reply.WrongLeader: %t, reply.Err: %s, server: %d\n", reply.WrongLeader, reply.Err, kv.me)
 }
@@ -221,145 +285,169 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.persister = persister
 	kv.data = make(map[string]string)
 	kv.executedID = make(map[int64]int)
 	kv.notify = make(map[int][]chan Op)
-	kv.appliedEntry = 0
 	
 	kv.QuitCH = make(chan bool)
 	kv.Msgs = list.New()
 	kv.Recv = make(chan raft.ApplyMsg)
+	kv.lastIncludedIndex = 0
+	kv.lastIncludedTerm = 0
+	kv.readPersist(persister.ReadSnapshot())
+	if kv.rf.FirstIndex() < kv.lastIncludedIndex {
+		kv.rf.CutLog(kv.lastIncludedIndex, kv.lastIncludedTerm)
+	} else if kv.rf.FirstIndex() > kv.lastIncludedIndex {
+		fmt.Println("error 2")
+	}
 	
 	go func() {
-	//    for range kv.applyCh {
-//	        ////fmt.Printf("Receive apply msg, server:%d, client:%d, seq:%d, index:%d\n", kv.me, msg.Command.(Op).Client, msg.Command.(Op).Sequence, msg.Index)
-	  //      go kv.apply()
-	       
-	   // }
-	   for {
-	       var (
-	           recvChan chan raft.ApplyMsg
-	   	      recvVal  raft.ApplyMsg
-	       )
-	       if kv.Msgs.Len() > 0 {
-	           recvChan = kv.Recv
-	   	      recvVal = kv.Msgs.Front().Value.(raft.ApplyMsg)
-	       }
-	       select {
-	       case msg := <- kv.applyCh:
-	   	      kv.Msgs.PushBack(msg)
-		      kv.appliedEntry++
-		      ////fmt.Println(kv.me, " append list at index:", msg.Index)
-	       case recvChan <- recvVal:
-	   	      kv.Msgs.Remove(kv.Msgs.Front())
-		      ////fmt.Println(kv.me, " receiving command at index:", recvVal.Index)
-	       case <- kv.QuitCH:
-	           return
-	       }
-	   }
-	} ()
-	
-	go func() {
-	  for {
-	     select {
-		case msg := <- kv.Recv:
-		    ////fmt.Println(kv.me, " is acquire kv.Recv lock")
-		    kv.mu.Lock()
-		    ////fmt.Println(kv.me, " applying command at index:", msg.Index)
-		   // kv.appliedEntry++
-		    kv.applyCommand(msg)
-		    kv.mu.Unlock()
-		    ////fmt.Println(kv.me, " release locks")
-		case <- kv.QuitCH:
-		    return
+		// for range kv.applyCh {
+		// 	//fmt.Printf("Receive apply msg, server:%d, client:%d, seq:%d, index:%d\n", kv.me, msg.Command.(Op).Client, msg.Command.(Op).Sequence, msg.Index)
+		// 	go kv.apply()
+
+		// }
+		for {
+			var (
+				recvChan chan raft.ApplyMsg
+				recvVal  raft.ApplyMsg
+			)
+			if kv.Msgs.Len() > 0 {
+				recvChan = kv.Recv
+				recvVal = kv.Msgs.Front().Value.(raft.ApplyMsg)
+			}
+			select {
+			case msg := <- kv.applyCh:
+				kv.Msgs.PushBack(msg)
+				////fmt.Println(kv.me, " append list at index:", msg.Index)
+			case recvChan <- recvVal:
+				kv.Msgs.Remove(kv.Msgs.Front())
+				////fmt.Println(kv.me, " receiving command at index:", recvVal.Index)
+			case <- kv.QuitCH:
+				return
+			}
 		}
-	    }
+	} ()
+
+	go func() {
+		for {
+			select {
+			case msg := <- kv.Recv:
+				////fmt.Println(kv.me, " is acquire kv.Recv lock")
+				kv.mu.Lock()
+				////fmt.Println(kv.me, " applying command at index:", msg.Index)
+				// kv.appliedEntry++
+				kv.applyCommand(msg)
+				kv.mu.Unlock()
+				////fmt.Println(kv.me, " release locks")
+			case <- kv.QuitCH:
+				return
+			}
+		}
+	} ()
+
+	go func() {
+		if maxraftstate <= 0 {
+			return
+		}
+		for {
+			select {
+			case <- time.After(10 * time.Millisecond):
+				if kv.rf.BeginSnapshot() {
+					if persister.RaftStateSize() >= maxraftstate {
+						// fmt.Println(kv.me, " log too large")
+						index, term, ok := kv.persist()
+						if ok {
+							kv.rf.CutLog(index, term)
+							// fmt.Println(kv.me, " cut log to ", index)
+						}
+					}
+					kv.rf.EndSnapshot()
+				}
+			case <- kv.QuitCH:
+				return
+			}
+		}
 	} ()
 	
 	return kv
 }
 
-func (kv *RaftKV) apply() {
-    kv.mu.Lock()
-    kv.appliedEntry++
-    msg := raft.ApplyMsg{Index: kv.appliedEntry, Command: kv.rf.Log[kv.appliedEntry].Command}
-    kv.applyCommand(msg)
-    kv.mu.Unlock()
-    
-}
-
 func (kv *RaftKV) applyCommand(msg raft.ApplyMsg) {
-    op := msg.Command.(Op)
-    logIndex := msg.Index
-    clientID := op.Client
-    opSequence := op.Sequence
-    res := Op{clientID, opSequence, op.Key, op.Value, op.Type, op.Err}
-    
-//    kv.mu.Lock()
-
-    ////fmt.Printf("Server:%d, Command is %s, opSequence: %d, kv.executedID[client]: %d\n", kv.me, op.Type, opSequence, kv.executedID[clientID])
-    if _, ok := kv.executedID[clientID]; !ok {
-        kv.executedID[clientID] = -1
-    }
-    
-    if opSequence > kv.executedID[clientID] {
-        ////fmt.Printf("Log Index:%d\n", logIndex)
-        switch op.Type {
-	case "Get":
-	    v, ok := kv.data[op.Key]
-	    if !ok {
-	        res.Err = ErrNoKey
-	    } else {
-	        res.Value = v
-	    }
-//	    ////fmt.Printf("Server:%d Get Value applied Client:%d, Seq: %d. Key:%s, Value:%s\n", kv.me, clientID, opSequence, op.Key, op.Value)
-	    ////fmt.Printf("Server:%d Get Value applied Client:%d, Seq: %d. Key:%s\n", kv.me, clientID, opSequence, op.Key)
-	case "Put":
-	    kv.data[op.Key] = op.Value
-	    ////fmt.Printf("Server:%d Put Value applied Client:%d, Seq: %d. Key:%s, Value:%s\n", kv.me, clientID, opSequence, op.Key, op.Value)
-	case "Append":
-	    _, ok := kv.data[op.Key]
-	    if !ok {
-	        kv.data[op.Key] = op.Value
-	    } else {
-	        kv.data[op.Key] += op.Value
-	    }
-	    ////fmt.Printf("Server %d Append Value applied Client:%d, Seq: %d. Key:%s, append:%s\n", kv.me, clientID, opSequence, op.Key, op.Value)
-//	    ////fmt.Printf("Server %d Append Value applied Client:%d, Seq: %d.Key:%s, ValueAfterAppend:%s, append:%s\n", kv.me, clientID, opSequence, op.Key, kv.data[op.Key], op.Value)
+	if msg.UseSnapshot {
+		// fmt.Println(kv.me, " receive snapshot through channel")
+		kv.readPersist(msg.Snapshot)
+		return
 	}
-	kv.executedID[clientID] = opSequence
-    } else {
-        ////fmt.Printf("Server %d Already seen Client : %d, Seq: %d.\n",kv.me,  clientID, opSequence)
-        if op.Type == "Get" {
-	    v, ok := kv.data[op.Key]
-	    if !ok {
-	        res.Err = ErrNoKey
-	    } else {
-	        res.Value = v
-	    }
+	// fmt.Println(kv.me, " receiving command at index ", msg.Index)
+	kv.lastIncludedIndex = msg.Index
+	kv.lastIncludedTerm = kv.rf.GetTerm(kv.lastIncludedIndex)
+	op := msg.Command.(Op)
+	logIndex := msg.Index
+	clientID := op.Client
+	opSequence := op.Sequence
+	res := Op{clientID, opSequence, op.Key, op.Value, op.Type, op.Err}
+	// kv.mu.Lock()
+	////fmt.Printf("Server:%d, Command is %s, opSequence: %d, kv.executedID[client]: %d\n", kv.me, op.Type, opSequence, kv.executedID[clientID])
+
+	if _, ok := kv.executedID[clientID]; !ok {
+		kv.executedID[clientID] = -1
 	}
-    }
     
-//    kv.mu.Unlock()
-    if _, ok := kv.notify[logIndex]; !ok {
-        ////fmt.Printf("server %d, client:%d, seq:%d, index:%d No one notify and return\n", kv.me, clientID, opSequence, logIndex)
-//	kv.mu.Lock()
-        return
-    }
-    
-//    kv.mu.Unlock()
-    for _,  c := range kv.notify[logIndex] {
-       // tmp := Op{res.Client, res.Sequence, res.Key, res.Value, res.Type, res.Err}
-	////fmt.Printf("-----------------------tmp made and put on channel in  server %d, client:%d, seq:%d\n", kv.me, clientID, opSequence)
-	kv.mu.Unlock()
-        c <- res
-	kv.mu.Lock()
-	////fmt.Printf("Channel taken on server %d, client:%d, seq:%d\n", kv.me, clientID, opSequence)
-    }
-//    kv.mu.Lock()
-
-    delete(kv.notify, logIndex)
-    
-//    kv.mu.Unlock()
-
+	if opSequence > kv.executedID[clientID] {
+		////fmt.Printf("Log Index:%d\n", logIndex)
+		switch op.Type {
+		case "Get":
+			v, ok := kv.data[op.Key]
+			if !ok {
+				res.Err = ErrNoKey
+			} else {
+				res.Value = v
+			}
+			////fmt.Printf("Server:%d Get Value applied Client:%d, Seq: %d. Key:%s, Value:%s\n", kv.me, clientID, opSequence, op.Key, op.Value)
+			////fmt.Printf("Server:%d Get Value applied Client:%d, Seq: %d. Key:%s\n", kv.me, clientID, opSequence, op.Key)
+		case "Put":
+			kv.data[op.Key] = op.Value
+			////fmt.Printf("Server:%d Put Value applied Client:%d, Seq: %d. Key:%s, Value:%s\n", kv.me, clientID, opSequence, op.Key, op.Value)
+		case "Append":
+			_, ok := kv.data[op.Key]
+			if !ok {
+				kv.data[op.Key] = op.Value
+			} else {
+				kv.data[op.Key] += op.Value
+			}
+			////fmt.Printf("Server %d Append Value applied Client:%d, Seq: %d. Key:%s, append:%s\n", kv.me, clientID, opSequence, op.Key, op.Value)
+			////fmt.Printf("Server %d Append Value applied Client:%d, Seq: %d.Key:%s, ValueAfterAppend:%s, append:%s\n", kv.me, clientID, opSequence, op.Key, kv.data[op.Key], op.Value)
+		}
+		kv.executedID[clientID] = opSequence
+	} else {
+		////fmt.Printf("Server %d Already seen Client : %d, Seq: %d.\n",kv.me,  clientID, opSequence)
+		if op.Type == "Get" {
+			v, ok := kv.data[op.Key]
+			if !ok {
+				res.Err = ErrNoKey
+			} else {
+				res.Value = v
+			}
+		}
+	}
+	// kv.mu.Unlock()
+	if _, ok := kv.notify[logIndex]; !ok {
+		////fmt.Printf("server %d, client:%d, seq:%d, index:%d No one notify and return\n", kv.me, clientID, opSequence, logIndex)
+		// kv.mu.Lock()
+		return
+	}
+	// kv.mu.Unlock()
+	for _,  c := range kv.notify[logIndex] {
+		// tmp := Op{res.Client, res.Sequence, res.Key, res.Value, res.Type, res.Err}
+		////fmt.Printf("-----------------------tmp made and put on channel in  server %d, client:%d, seq:%d\n", kv.me, clientID, opSequence)
+		kv.mu.Unlock()
+		c <- res
+		kv.mu.Lock()
+		////fmt.Printf("Channel taken on server %d, client:%d, seq:%d\n", kv.me, clientID, opSequence)
+	}
+	// kv.mu.Lock()
+	delete(kv.notify, logIndex)
+	// kv.mu.Unlock()
 }

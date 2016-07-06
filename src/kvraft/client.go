@@ -49,14 +49,14 @@ func (ck *Clerk) Get(key string) string {
 	ck.Sequence++
 	i := ck.leader
 	for {
-	    reply := GetReply{}
-	    if ok := ck.servers[i].Call("RaftKV.Get", &args, &reply); ok {
-	        if !reply.WrongLeader && reply.Err == OK {
-		    ck.leader = i
-		    return reply.Value
+		reply := GetReply{}
+		if ok := ck.servers[i].Call("RaftKV.Get", &args, &reply); ok {
+			if !reply.WrongLeader && reply.Err == OK {
+				ck.leader = i
+				return reply.Value
+			}
 		}
-	    }
-	    i = (i+1)%len(ck.servers)
+		i = (i+1)%len(ck.servers)
 	}
 }
 
@@ -77,15 +77,15 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.Sequence++
 	i := ck.leader
 	for {
-	    reply := PutAppendReply{}
-	    if ok := ck.servers[i].Call("RaftKV.PutAppend", &args, &reply); ok {
-	        if (!reply.WrongLeader) && (reply.Err == OK) {
-		    //fmt.Printf("Break ------------------------------------------------------------------\n")
-		    ck.leader = i
-		    break
+		reply := PutAppendReply{}
+		if ok := ck.servers[i].Call("RaftKV.PutAppend", &args, &reply); ok {
+			if (!reply.WrongLeader) && (reply.Err == OK) {
+				//fmt.Printf("Break ------------------------------------------------------------------\n")
+				ck.leader = i
+				break
+			}
 		}
-	    }
-	    i = (i+1)%len(ck.servers)
+		i = (i+1)%len(ck.servers)
 	}
 }
 

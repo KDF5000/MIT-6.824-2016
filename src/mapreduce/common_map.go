@@ -49,19 +49,19 @@ func doMap(
 	enc := make([](*json.Encoder), nReduce)
 	files := make([](*os.File), nReduce)
 	for i := 0; i < nReduce; i++ {
-	    name := reduceName(jobName, mapTaskNumber, i)
-	    files[i], _ = os.Create(name)
-	    enc[i] = json.NewEncoder(files[i])
+		name := reduceName(jobName, mapTaskNumber, i)
+		files[i], _ = os.Create(name)
+		enc[i] = json.NewEncoder(files[i])
 	}
 
 	for key, kv := range kvs {
-	    hashNum := ihash(kvs[key].Key)
-	    hashNum = hashNum % (uint32)(nReduce)
-	    _ = enc[hashNum].Encode(&kv)
+		hashNum := ihash(kvs[key].Key)
+		hashNum = hashNum % (uint32)(nReduce)
+		_ = enc[hashNum].Encode(&kv)
 	}
 
 	for i := 0; i < nReduce; i++ {
-	    files[i].Close()
+		files[i].Close()
 	}
 }
 

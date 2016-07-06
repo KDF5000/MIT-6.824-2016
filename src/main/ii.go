@@ -15,15 +15,15 @@ import "unicode"
 func mapF(document string, value string) (res []mapreduce.KeyValue) {
 	// TODO: you should complete this to do the inverted index challenge
 	words := strings.FieldsFunc(value,
-	      	 func (r rune) bool {
-		      	 return !unicode.IsLetter(r)})
+		func (r rune) bool {
+			return !unicode.IsLetter(r)})
 	wordMap := make(map[string]string)
 	for _, w := range words {
-	       if _, ok := wordMap[w]; !ok {
-	           kv := mapreduce.KeyValue{w, document}
-	           res = append(res, kv)
-		   wordMap[w] = document
-	       }
+		if _, ok := wordMap[w]; !ok {
+			kv := mapreduce.KeyValue{w, document}
+			res = append(res, kv)
+			wordMap[w] = document
+		}
 	}
 	return
 }
@@ -37,10 +37,10 @@ func reduceF(key string, values []string) string {
 	res := strconv.Itoa(len(values))
 	res += " "
 	for i, doc := range values {
-	    res += doc
-	    if i < len(values)-1 {
-	        res += ","
-	    }
+		res += doc
+		if i < len(values)-1 {
+			res += ","
+		}
 	}
 	return res
 }
