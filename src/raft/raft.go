@@ -477,7 +477,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.Log = append(rf.Log, entry)
 		index = base + len(rf.Log)-1
 		term = rf.CurrentTerm
-		go rf.Broadcast()
+		go rf.broadcast()
 		rf.mu.Unlock()
 		rf.persist()
 		// go rf.persist()
@@ -486,7 +486,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-func (rf *Raft) Broadcast() {
+func (rf *Raft) broadcast() {
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(index int) {
@@ -616,20 +616,19 @@ func (rf *Raft) FollowerState() {
 	if !rf.active {
 		return
 	}
+	// fmt.Println(rf.me, " becomes follower")
 
-	electiontimeout := 200
-	randomized := electiontimeout + rand.Intn(electiontimeout)
+	electiontimeout := 100
+	randomized := electiontimeout + rand.Intn(2*electiontimeout)
 	nexttimeout := time.Duration(randomized)
 	t := time.NewTimer(nexttimeout * time.Millisecond)
 	for {
 		select {
 		case <- t.C:
-			rf.mu.Lock()
-			rf.State = "Candidate"
-			rf.mu.Unlock()
+			rf.becomesCandidate()
 			return
 		case rf.HeartBeatCH <- true:
-			randomized  = electiontimeout + rand.Intn(electiontimeout)
+			randomized  = electiontimeout + rand.Intn(2*electiontimeout)
 			nexttimeout = time.Duration(randomized)
 			t.Reset(nexttimeout * time.Millisecond)
 		case rf.ToFollower <- true:
@@ -645,22 +644,32 @@ func (rf *Raft) FollowerState() {
 	}
 }
 
+func (rf *Raft) becomesCandidate() {
+	rf.mu.Lock()
+	rf.State = "Candidate"
+	rf.CurrentTerm = rf.CurrentTerm + 1
+	rf.VotedFor = rf.me
+	rf.mu.Unlock()
+	rf.persist()
+}
+
 func (rf *Raft) CandidateState() {
 	if !rf.active {
 		return
 	}
-	rf.mu.Lock()
+	// fmt.Println(rf.me, " is in candidate loop")
+	// rf.mu.Lock()
 	// increase currentTerm, and vote for self
-	rf.CurrentTerm = rf.CurrentTerm + 1
+	// rf.CurrentTerm = rf.CurrentTerm + 1
 	totalVotes := 1
-	rf.VotedFor = rf.me
-	rf.mu.Unlock()
+	// rf.VotedFor = rf.me
+	// rf.mu.Unlock()
     
-	rf.persist()
+	// rf.persist()
 	// go rf.persist()
     
-	electiontimeout := 200
-	randomized  := electiontimeout + rand.Intn(electiontimeout)
+	electiontimeout := 100
+	randomized  := electiontimeout + rand.Intn(2*electiontimeout)
 	nexttimeout := time.Duration(randomized)
 	t := time.NewTimer(nexttimeout * time.Millisecond)
 
@@ -723,6 +732,7 @@ func (rf *Raft) CandidateState() {
 	for rf.NowState() == "Candidate" {
 		select {
 		case <- t.C:
+			rf.becomesCandidate()
 			return
 		case VotesCollect <- true:
 			totalVotes++
@@ -730,7 +740,9 @@ func (rf *Raft) CandidateState() {
 				rf.mu.Lock()
 				rf.State = "Leader"
 				close(VotesCollect)
+				rf.becomesLeader()
 				rf.mu.Unlock()
+				go rf.broadcast()
 				return
 			}
 		case rf.ToFollower <- true:
@@ -749,27 +761,32 @@ func (rf *Raft) CandidateState() {
 	}
 }
 
-func (rf *Raft) LeaderState() {
-	if !rf.active {
-		return
-	}
-	rf.mu.Lock()
+func (rf *Raft) becomesLeader() {
 	rf.NextIndex = make([]int, len(rf.peers))
 	rf.MatchIndex = make([]int, len(rf.peers))
 	for i := range rf.peers {
 		rf.NextIndex[i] = rf.Log[len(rf.Log)-1].Index+1
 		rf.MatchIndex[i] = rf.Log[0].Index
 	}
-	currentTerm := rf.CurrentTerm
 	rf.Snapshotting = make([]bool, len(rf.peers))
 	rf.sendingSnapshot = make(map[int]*SnapshotInfo)
+}
+
+func (rf *Raft) LeaderState() {
+	if !rf.active {
+		return
+	}
+
+	// fmt.Println(rf.me, " becomes leader in leader loop")
+	//  rf.broadcast()
+	rf.mu.Lock()
+	currentTerm := rf.CurrentTerm
 	rf.mu.Unlock()
-	// fmt.Println(rf.me, " becomes leader")
-	//  rf.Broadcast()
+	
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(index int) {
-				timeout := time.Millisecond
+				timeout := 60 * time.Millisecond
 				offset := 0
 				done := false
 				for rf.NowState() == "Leader" && rf.CurrentTerm == currentTerm {
@@ -777,7 +794,7 @@ func (rf *Raft) LeaderState() {
 					// then do not send that request and becomes to follower
 					select {
 					case <- time.After(timeout):
-						timeout = 60 * time.Millisecond
+						// timeout = 60 * time.Millisecond
 						rf.mu.Lock()
 						if rf.Snapshotting[index] || rf.NextIndex[index] <= rf.Log[0].Index {
 							if !rf.Snapshotting[index] {
