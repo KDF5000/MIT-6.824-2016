@@ -362,7 +362,11 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 	if tmp, ok := rf.tmpSnapshot[args.LastIncludedIndex]; ok {
 		if len(tmp.data) >= args.Offset {
 			// fmt.Println(rf.me, " receving snapshot")
-			rf.tmpSnapshot[args.LastIncludedIndex].data = append(rf.tmpSnapshot[args.LastIncludedIndex].data[: args.Offset], args.Data...)
+			i := 0
+			for ; i < len(args.Data) && i + args.Offset < len(tmp.data); i++ {
+				rf.tmpSnapshot[args.LastIncludedIndex].data[args.Offset + i] = args.Data[i]
+			}
+			rf.tmpSnapshot[args.LastIncludedIndex].data = append(rf.tmpSnapshot[args.LastIncludedIndex].data[: args.Offset], args.Data[i:]...)
 		} else {
 			reply.Success = false
 			rf.mu.Unlock()
@@ -405,11 +409,11 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 		}
 		rf.LastApplied = args.LastIncludedIndex
 		rf.CommitIndex = args.LastIncludedIndex
+		msg := ApplyMsg{args.LastIncludedIndex, 0, true, rf.tmpSnapshot[args.LastIncludedIndex].data}
+		go func() { rf.ApplyCH <- msg } ()
 		rf.mu.Unlock()
 		rf.persist()
 		rf.EndSnapshot()
-		msg := ApplyMsg{args.LastIncludedIndex, 0, true, rf.tmpSnapshot[args.LastIncludedIndex].data}
-		go func() { rf.ApplyCH <- msg } ()
 	} else {
 		rf.mu.Unlock()
 	}
@@ -810,7 +814,7 @@ func (rf *Raft) LeaderState() {
 							}
 							var dataLen int
 							if len(rf.sendingSnapshot[index].data) - offset > 1000 {
-								dataLen = 100
+								dataLen = 1000
 								done = false
 							} else {
 								dataLen = len(rf.sendingSnapshot[index].data) - offset
@@ -967,6 +971,7 @@ func (rf *Raft) processSnapshotReply(args InstallSnapshotArgs, reply *InstallSna
 				*offset = 0
 				rf.Snapshotting[index] = false
 				rf.NextIndex[index] = args.LastIncludedIndex + 1
+				rf.MatchIndex[index] = args.LastIncludedIndex
 			} else {
 				*offset = *offset + len(args.Data)
 			}

@@ -353,7 +353,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		}
 		for {
 			select {
-			case <- time.After(10 * time.Millisecond):
+			case <- time.After(5 * time.Millisecond):
 				if kv.rf.BeginSnapshot() {
 					if persister.RaftStateSize() >= maxraftstate {
 						// fmt.Println(kv.me, " log too large")
