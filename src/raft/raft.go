@@ -32,6 +32,7 @@ import "fmt"
 //
 type ApplyMsg struct {
 	Index       int
+	Term        int
 	Command     interface{}
 	UseSnapshot bool   // ignore for lab2; only used in lab3
 	Snapshot    []byte // ignore for lab2; only used in lab3
@@ -83,6 +84,8 @@ type Raft struct {
 	sendingSnapshot   map[int]*SnapshotInfo    // peer index to snapshot, for leader
 	SnapshotProgress  bool                     // whether a server is taking snapshot, either by kvraft or InstallSnapshot RPC
 
+	snapshotMutex  sync.Mutex
+	
 }
 
 type SnapshotInfo struct {
@@ -366,7 +369,9 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 			for ; i < len(args.Data) && i + args.Offset < len(tmp.data); i++ {
 				rf.tmpSnapshot[args.LastIncludedIndex].data[args.Offset + i] = args.Data[i]
 			}
-			rf.tmpSnapshot[args.LastIncludedIndex].data = append(rf.tmpSnapshot[args.LastIncludedIndex].data[: args.Offset], args.Data[i:]...)
+			if i + args.Offset == len(tmp.data) {
+				rf.tmpSnapshot[args.LastIncludedIndex].data = append(rf.tmpSnapshot[args.LastIncludedIndex].data[: i + args.Offset], args.Data[i:]...)
+			}
 		} else {
 			reply.Success = false
 			rf.mu.Unlock()
@@ -391,6 +396,12 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 			<- time.After(2*time.Millisecond)
 		}
 		rf.mu.Lock()
+		base := rf.Log[0].Index
+		if _, ok := rf.tmpSnapshot[args.LastIncludedIndex]; !ok || args.LastIncludedIndex <= rf.Log[0].Index {
+			rf.mu.Unlock()
+			rf.EndSnapshot()
+			return
+		}
 		rf.persister.SaveSnapshot(rf.tmpSnapshot[args.LastIncludedIndex].data)
 		for key := range rf.tmpSnapshot {
 			if key < args.LastIncludedIndex {
@@ -409,8 +420,8 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 		}
 		rf.LastApplied = args.LastIncludedIndex
 		rf.CommitIndex = args.LastIncludedIndex
-		msg := ApplyMsg{args.LastIncludedIndex, 0, true, rf.tmpSnapshot[args.LastIncludedIndex].data}
-		go func() { rf.ApplyCH <- msg } ()
+		msg := ApplyMsg{args.LastIncludedIndex, args.LastIncludedTerm, 0, true, rf.tmpSnapshot[args.LastIncludedIndex].data}
+		rf.ApplyCH <- msg
 		rf.mu.Unlock()
 		rf.persist()
 		rf.EndSnapshot()
@@ -813,8 +824,8 @@ func (rf *Raft) LeaderState() {
 								// fmt.Println(rf.me, " make argument of install snapshot of ", index)
 							}
 							var dataLen int
-							if len(rf.sendingSnapshot[index].data) - offset > 1000 {
-								dataLen = 1000
+							if len(rf.sendingSnapshot[index].data) - offset > 500 {
+								dataLen = 500
 								done = false
 							} else {
 								dataLen = len(rf.sendingSnapshot[index].data) - offset
@@ -988,6 +999,7 @@ func (rf *Raft) processApplyChan() {
 		base := rf.Log[0].Index
 		msg := ApplyMsg{}
 		msg.Index = rf.LastApplied
+		msg.Term = rf.Log[rf.LastApplied-base].Term
 		if rf.LastApplied < base {
 			fmt.Println(rf.me, "'s lastapplied is ", rf.LastApplied, " and base is ", base, " and state is", rf.State)
 		}
@@ -1042,8 +1054,8 @@ func (rf *Raft) FirstIndex() int {
 }
 
 func (rf *Raft) BeginSnapshot() bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.snapshotMutex.Lock()
+	defer rf.snapshotMutex.Unlock()
 	if rf.SnapshotProgress {
 		return false
 	} else {
@@ -1053,7 +1065,7 @@ func (rf *Raft) BeginSnapshot() bool {
 }
 
 func (rf *Raft) EndSnapshot() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.snapshotMutex.Lock()
+	defer rf.snapshotMutex.Unlock()
 	rf.SnapshotProgress = false
 }

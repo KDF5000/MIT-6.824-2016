@@ -13,7 +13,7 @@ import "crypto/rand"
 import "math/big"
 import "shardmaster"
 import "time"
-
+// import "fmt"
 //
 // which shard is a key in?
 // please use this function,
@@ -40,6 +40,8 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	clientID int64
+	Sequence int64
 }
 
 //
@@ -56,6 +58,8 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.clientID = nrand()
+	ck.Sequence = 0
 	return ck
 }
 
@@ -68,10 +72,15 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
+	args.Client = ck.clientID
+	args.Sequence = ck.Sequence
+	ck.Sequence++
 
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+		//**fmt.Println("Get key from gid: ", gid, ", from cf num:", ck.config.Num, "shard:", shard)
+		//**fmt.Println(ck.config)
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
@@ -103,7 +112,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
-
+	args.Client = ck.clientID
+	args.Sequence = ck.Sequence
+	ck.Sequence++
 
 	for {
 		shard := key2shard(key)

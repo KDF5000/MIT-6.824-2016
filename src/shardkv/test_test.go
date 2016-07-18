@@ -9,6 +9,7 @@ import "math/rand"
 
 func check(t *testing.T, ck *Clerk, key string, value string) {
 	v := ck.Get(key)
+	// fmt.Println("Get Key:", key, ". Value:", v, "Shard: ", key2shard(key))
 	if v != value {
 		t.Fatalf("Get(%v): expected:\n%v\nreceived:\n%v", key, value, v)
 	}
