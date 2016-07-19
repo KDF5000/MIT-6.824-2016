@@ -112,14 +112,13 @@ func (kv *ShardKV) persist() (int, int, bool) {
 		kv.mu.Unlock()
 		return index, term, false
 	}
-
 	e.Encode(kv.lastIncludedIndex)
 	e.Encode(kv.lastIncludedTerm)
 	// e.Encode(kv.Configs)
 	e.Encode(kv.ConfigNum)
 	e.Encode(kv.Shards)
-	e.Encode(kv.data)
 	e.Encode(kv.executedID)
+	e.Encode(kv.data)
 	data := w.Bytes()
 	kv.persister.SaveSnapshot(data)
 	kv.mu.Unlock()
@@ -142,8 +141,8 @@ func (kv *ShardKV) readPersist(data []byte) {
 	// d.Decode(&kv.Configs)
 	d.Decode(&kv.ConfigNum)
 	d.Decode(&kv.Shards)
-	d.Decode(&kv.data)
 	d.Decode(&kv.executedID)
+	d.Decode(&kv.data)
 }
 
 func (kv * ShardKV) clientRequest(op Op, reply *OpReply) {
@@ -585,14 +584,24 @@ func (kv *ShardKV) deleteShard2(data map[string]string, s int, num int) {
 		for i := range data {
 			if _, ok := kv.data[i]; ok {
 				delete(kv.data, i)
+				//fmt.Println(kv.me, " at ", kv.gid, " delete:", i)
 			}
 		}
 		//**fmt.Println("Server:", kv.me, " deleted shard: ", s, " and kv.Shards:", kv.Shards[s])
 		kv.Shards[s] = 0
+		// Because kv.persist() fo not persist when kv.lastIncludedIndex does not change.
+		// So do not call the persist() function. Instead directly save the state
 		if (kv.maxraftstate > 0) {
-			kv.mu.Unlock()
-			kv.persist()
-			kv.mu.Lock()
+			w := new(bytes.Buffer)
+			e := gob.NewEncoder(w)
+			e.Encode(kv.lastIncludedIndex)
+			e.Encode(kv.lastIncludedTerm)
+			e.Encode(kv.ConfigNum)
+			e.Encode(kv.Shards)
+			e.Encode(kv.executedID)
+			e.Encode(kv.data)
+			data := w.Bytes()
+			kv.persister.SaveSnapshot(data)
 		}
 	}
 }

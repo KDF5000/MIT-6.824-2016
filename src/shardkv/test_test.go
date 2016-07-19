@@ -611,6 +611,7 @@ func TestChallenge1Delete(t *testing.T) {
 		for i := 0; i < cfg.n; i++ {
 			raft := cfg.groups[gi].saved[i].RaftStateSize()
 			snap := len(cfg.groups[gi].saved[i].ReadSnapshot())
+			// fmt.Println("group:", gi, ", i:", i, ", raft:", raft, ", snap:", snap)
 			total += raft + snap
 		}
 	}

@@ -1024,7 +1024,7 @@ func (rf *Raft) CutLog(index int, term int) {
 	entry := LogEntry{index, 0, term}
 	if index <= rf.Log[0].Index {
 		rf.mu.Unlock()
-		fmt.Println("error 3")
+		// fmt.Println("error 3")
 		// fmt.Println(rf.me, " is called CutLog, but base:", base, " and index: ", index)
 		return
 	} else if index <= rf.Log[len(rf.Log)-1].Index {
